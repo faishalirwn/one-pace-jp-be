@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -18,11 +19,21 @@ device = "cuda"
 batch_size = 16
 compute_type = "float16"
 storage_path = Path("storage")
+ref_sub_dir_name = "references"
+ori_dir_name = "original"
 model_path = storage_path / "whisperx_models"
 
 app = FastAPI()
 
 tagger = Tagger()
+
+model = whisperx.load_model(
+    "large-v2",
+    device,
+    compute_type=compute_type,
+    download_root=model_path.as_posix(),
+    language="ja",
+)
 
 
 class Status(str, Enum):
@@ -49,7 +60,85 @@ class SessionProcess(TypedDict):
     total: int
 
 
+class FileTypes(str, Enum):
+    AUDIO = "audio"
+    ORIGINAL_SUB = "original_sub"
+    REF_SUB = "ref_sub"
+    REF_SUB_MANUAL = "ref_sub_manual"
+
+
 current_process: dict[str, SessionProcess] = {}
+
+
+def get_session_path(session_id: str):
+    session_path = storage_path / session_id
+    if not session_path:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return storage_path / session_id
+
+
+def get_session_files(session_id: str):
+    session_path = get_session_path(session_id)
+
+    ori_files = get_dir_files(session_path / ori_dir_name)
+
+    audio_path = [
+        file
+        for file in ori_files
+        if mimetypes.guess_type(file)[0].split("/")[0] == "audio"
+    ]
+    ori_sub_path = [
+        file
+        for file in ori_files
+        if mimetypes.guess_type(file)[0].split("/")[0] == "text"
+    ]
+
+    ref_subs_path = get_dir_files(session_path / ref_sub_dir_name)
+
+    if not ref_subs_path or not audio_path or not ori_sub_path:
+        return {}
+    else:
+        return {
+            "audio_path": audio_path[0],
+            "ori_sub_path": ori_sub_path[0],
+            "ref_subs_path": ref_subs_path,
+        }
+
+
+def get_dir_files(dir_path: Path):
+    try:
+        flist = [p for p in Path(dir_path).iterdir() if p.is_file()]
+    except Exception:
+        return []
+    return flist
+
+
+async def extract_audio(video: Path, output_path: Path) -> Path:
+    output_path_full = output_path / f"{Path(video).stem}.opus"
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        video,
+        "-vn",  # Disable video
+        "-c:a",
+        "libopus",  # Use Opus codec
+        "-b:a",
+        "128k",  # Set bitrate (adjust as needed)
+        output_path_full,
+    ]
+
+    try:
+        # Run the FFmpeg command
+        subprocess.run(command, check=True, stderr=subprocess.PIPE)
+        print(f"Audio extracted and converted to Opus: {output_path_full}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error occurred: {e.stderr.decode()}")
+
+    return output_path_full
 
 
 async def save_upload_file(
@@ -62,6 +151,8 @@ async def save_upload_file(
             for file in upload_files:
                 if file.filename is None:
                     raise HTTPException(status_code=400, detail="Invalid file")
+
+                print(f"Saving {file.filename}...")
                 save_path = destination / file.filename
                 with save_path.open("wb") as buffer:
                     while content := await file.read(1024):
@@ -72,6 +163,7 @@ async def save_upload_file(
             if upload_files.filename is None:
                 raise HTTPException(status_code=400, detail="Invalid file")
 
+            print(f"Saving {upload_files.filename}...")
             save_path = destination / upload_files.filename
             with save_path.open("wb") as buffer:
                 while content := await upload_files.read(1024):
@@ -131,7 +223,7 @@ def match_japanese_string(
     return sorted(matches, key=lambda d: d["score"], reverse=True)
 
 
-def process_sub(
+def transcribe_and_match(
     session_path: Path,
     ja_sub_paths: Path | list[Path],
     eng_sub_path: Path | None = None,
@@ -169,6 +261,9 @@ def process_sub(
                 [
                     "ffmpeg",
                     "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
                     "-i",
                     audio_path.as_posix(),
                     "-ss",
@@ -181,20 +276,14 @@ def process_sub(
                 ],
             )
 
-            model = whisperx.load_model(
-                "large-v2",
-                device,
-                compute_type=compute_type,
-                download_root=model_path.as_posix(),
-                language="ja",
-            )
-
             whisper_audio = whisperx.load_audio(segment_file_path)
             result = model.transcribe(
                 whisper_audio, batch_size=batch_size, language="ja"
             )
 
             transcription = result["segments"][0]["text"] if result["segments"] else ""
+
+        print(transcription)
 
         matches = (
             match_japanese_string(transcription, official_ja_subs, 30)
@@ -237,8 +326,8 @@ def process_sub(
     print("😊😊😊😊😊😊")
 
 
-@app.get("/session")
-async def get_session():
+@app.get("/sessions")
+async def get_sessions():
     session_path = storage_path
     session_list = [f.path for f in os.scandir(session_path) if f.is_dir()]
     return {"session_list": ", ".join(session_list)}
@@ -259,17 +348,12 @@ async def delete_session(session_id: str):
     return {"session_id": session_id}
 
 
-@app.post("/match-sub/{session_id}")
-async def upload_audio(
+@app.post("/process-sub/{session_id}")
+async def process_sub(
     session_id: str,
-    audio: UploadFile,
-    eng_subtitle: UploadFile,
-    ja_subtitles: list[UploadFile],
     background_tasks: BackgroundTasks,
 ):
-    session_path = storage_path / session_id
-    if not session_path:
-        raise HTTPException(status_code=404, detail="Session not found")
+    session_path = get_session_path(session_id)
 
     if (
         session_id in current_process
@@ -277,39 +361,20 @@ async def upload_audio(
     ):
         raise HTTPException(status_code=409, detail="File is currently being processed")
 
-    audio_path: Path = await save_upload_file(audio, session_path)
-    eng_sub_path: Path = await save_upload_file(eng_subtitle, session_path)
-    ja_sub_paths = await save_upload_file(ja_subtitles, session_path / "references")
+    session_files = get_session_files(session_id)
+
+    if not session_files:
+        return {"message": "submit required files"}
+
+    audio_path = session_files["audio_path"]
+    eng_sub_path = session_files["ori_sub_path"]
+    ja_sub_paths = session_files["ref_subs_path"]
 
     background_tasks.add_task(
-        process_sub, session_path, ja_sub_paths, eng_sub_path, audio_path
+        transcribe_and_match, session_path, ja_sub_paths, eng_sub_path, audio_path
     )
 
-    return {
-        "audio": audio,
-        "eng_subtitle": eng_subtitle,
-        "ja_subtitle": ja_subtitles,
-    }
-
-
-@app.post("/ref-sub/{session_id}")
-async def upload_subtitle(
-    session_id: str,
-    subtitles: list[UploadFile],
-    background_tasks: BackgroundTasks,
-):
-    session_path = storage_path / session_id
-    if not session_path:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    await save_upload_file(subtitles, session_path / "references")
-
-    background_tasks.add_task(process_sub, session_path, subtitles, is_transcribed=True)
-
-    return {
-        "status": "success",
-        "subtitle": ",".join(str(sub.filename) for sub in subtitles),
-    }
+    return {"message": "processing sub matching sub started"}
 
 
 @app.get("/processed/{session_id}")
@@ -321,3 +386,81 @@ async def get_transcription(session_id: str):
     with open(session_path / "processed.json", "r") as f:
         processed = json.load(f)
         return processed
+
+
+@app.get("/files/{session_id}")
+async def get_files(session_id: str):
+    session_files = get_session_files(session_id)
+
+    return session_files
+
+
+@app.post("/files/{session_id}/{file_type}")
+async def upload_files(
+    session_id: str,
+    file_type: FileTypes,
+    files: list[UploadFile],
+    sub: str | None = None,
+):
+    session_path = get_session_path(session_id)
+
+    if file_type == FileTypes.REF_SUB_MANUAL and not sub:
+        return {"message": "sub manual file must be str aight"}
+
+    if file_type == FileTypes.AUDIO and files[0].content_type.split("/")[0] != "audio":
+        return {
+            "message": f"that ain't audio, but {files[0].content_type.split('/')[0]}"
+        }
+
+    if (file_type == FileTypes.ORIGINAL_SUB or file_type == FileTypes.REF_SUB) and (
+        files[0].filename.split(".")[-1] != "srt"
+        and files[0].filename.split(".")[-1] != "ass"
+    ):
+        return {"message": f"that ain't text, but {files[0].filename.split('.')[-1]}"}
+
+    if file_type == FileTypes.AUDIO or file_type == FileTypes.ORIGINAL_SUB:
+        ori_files = get_dir_files(session_path / ori_dir_name)
+
+        if ori_files:
+            audio_path = [
+                file
+                for file in ori_files
+                if mimetypes.guess_type(file)[0].split("/")[0] == "audio"
+            ]
+            if audio_path and file_type == FileTypes.AUDIO:
+                audio_path[0].unlink()
+
+            ori_sub_path = [
+                file
+                for file in ori_files
+                if mimetypes.guess_type(file)[0].split("/")[0] == "text"
+            ]
+            if ori_sub_path and file_type == FileTypes.ORIGINAL_SUB:
+                ori_sub_path[0].unlink()
+
+        await save_upload_file(files[0], session_path / ori_dir_name)
+
+    if file_type == FileTypes.REF_SUB:
+        for file in files:
+            await save_upload_file(file, session_path / ref_sub_dir_name)
+
+    if file_type == FileTypes.REF_SUB_MANUAL:
+        with open(session_path / ref_sub_dir_name / "ref_sub.txt", "w") as f:
+            f.write(sub)
+
+    return {"message": "upload success"}
+
+
+@app.delete("/files/{session_id}/{file_type}")
+async def delete_file(session_id: str, file_type: FileTypes, filename: str):
+    session_path = get_session_path(session_id)
+
+    if file_type == FileTypes.REF_SUB:
+        sub_path = session_path / ref_sub_dir_name / filename
+        try:
+            sub_path.unlink()
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return {"message": f"{filename} deleted"}
+
+    return {"message": "not ref sub file can't delete'"}
