@@ -12,15 +12,21 @@ import jaconv
 import pysubs2
 import whisperx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from fugashi import Tagger
+from pydantic import BaseModel
+from pysubs2 import SSAEvent, SSAFile
 from rapidfuzz import fuzz
 
 device = "cuda"
 batch_size = 16
 compute_type = "float16"
 storage_path = Path("storage")
-ref_sub_dir_name = "references"
-ori_dir_name = "original"
+ref_sub_dirname = "references"
+ori_dirname = "original"
+transcription_filename = "transcription.json"
+final_sub_filename = "final.srt"
+manual_ref_sub_filename = "ref_sub.txt"
 model_path = storage_path / "whisperx_models"
 
 app = FastAPI()
@@ -51,6 +57,8 @@ class SubMatches(TypedDict):
     end_time: str
     text: str
     matches: list[SubMatch]
+    match: str | None
+    merge: bool
 
 
 class SessionProcess(TypedDict):
@@ -58,6 +66,15 @@ class SessionProcess(TypedDict):
     status: Status
     processed: int
     total: int
+
+
+class SubMatchesPartial(BaseModel):
+    match: str | None
+    merge: bool
+
+
+class SaveSubReq(BaseModel):
+    transcription: list[SubMatchesPartial]
 
 
 class FileTypes(str, Enum):
@@ -80,7 +97,7 @@ def get_session_path(session_id: str):
 def get_session_files(session_id: str):
     session_path = get_session_path(session_id)
 
-    ori_files = get_dir_files(session_path / ori_dir_name)
+    ori_files = get_dir_files(session_path / ori_dirname)
 
     audio_path = [
         file
@@ -93,10 +110,10 @@ def get_session_files(session_id: str):
         if mimetypes.guess_type(file)[0].split("/")[0] == "text"
     ]
 
-    ref_subs_path = get_dir_files(session_path / ref_sub_dir_name)
+    ref_subs_path = get_dir_files(session_path / ref_sub_dirname)
 
     if not ref_subs_path or not audio_path or not ori_sub_path:
-        return {}
+        return None
     else:
         return {
             "audio_path": audio_path[0],
@@ -109,7 +126,7 @@ def get_dir_files(dir_path: Path):
     try:
         flist = [p for p in Path(dir_path).iterdir() if p.is_file()]
     except Exception:
-        return []
+        return None
     return flist
 
 
@@ -226,18 +243,31 @@ def match_japanese_string(
 def transcribe_and_match(
     session_path: Path,
     ja_sub_paths: Path | list[Path],
-    eng_sub_path: Path | None = None,
-    audio_path: Path | None = None,
-    is_transcribed: bool = False,
+    eng_sub_path: Path,
+    audio_path: Path,
+    transcribe: bool = True,
 ):
+    transcription_file = session_path / transcription_filename
+    transcription_file_exists = transcription_file.is_file()
+
+    if not transcribe and not transcription_file_exists:
+        # how to convey/send this to frontend? this is background task
+        # fe shouldn't allow this, consult to fe
+        print("must transcribe, there is no previous transcription")
+        return
+
     segments_dir_path = session_path / "segments"
     session_id = session_path.parts[-1]
     official_ja_subs = load_ja_sub(ja_sub_paths)
 
     sub: pysubs2.SSAFile | list[SubMatches] = {}
-    if is_transcribed:
-        with open("processed.json") as f:
-            sub = json.load(f)["transcription"]
+
+    use_prev_transcription = not transcribe
+
+    if use_prev_transcription:
+        with open(transcription_file) as f:
+            transcription_content: SessionProcess = json.load(f)
+            sub = transcription_content["transcription"]
     else:
         segments_dir_path.mkdir(exist_ok=True)
         sub = pysubs2.load(eng_sub_path)
@@ -246,11 +276,13 @@ def transcribe_and_match(
         transcription = ""
         start_time = ""
         end_time = ""
+        merge = False
 
-        if is_transcribed:
+        if use_prev_transcription:
             transcription = line.text
             start_time = line.start_time
             end_time = line.end_time
+            merge = line.merge
         else:
             segment_file_path = (
                 segments_dir_path / f"segment_{i}{Path(audio_path).suffix}"
@@ -291,39 +323,50 @@ def transcribe_and_match(
             else []
         )
 
+        transcription_entry = {
+            "text": transcription,
+            "matches": matches,
+            "start_time": start_time,
+            "end_time": end_time,
+            "merge": merge,
+        }
+
         if session_id in current_process:
-            current_process[session_id]["transcription"].append(
-                {
-                    "text": transcription,
-                    "matches": matches,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                }
-            )
+            current_process[session_id]["transcription"].append(transcription_entry)
             current_process[session_id]["processed"] = i + 1
         else:
             current_process[session_id] = {
                 "status": Status.PROCESSING,
-                "transcription": [
-                    {
-                        "text": transcription,
-                        "matches": matches,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                    }
-                ],
                 "processed": i,
                 "total": len(sub),
+                "ori_sub_path": eng_sub_path,
+                "ref_sub_paths": ja_sub_paths,
+                "transcription": [transcription_entry],
             }
 
         current_process[session_id]["status"] = Status.PROCESSING
 
-    with open(session_path / "processed.json", "w", encoding="utf-8") as f:
-        json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
-
     current_process[session_id]["status"] = Status.FINISHED
 
+    with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
+        json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
+
     print("😊😊😊😊😊😊")
+
+
+def get_transcription(session_id: str) -> SessionProcess | None:
+    session_path = get_session_path(session_id)
+    if not session_path:
+        return None
+    transcription_file = session_path / transcription_filename
+    transcription_file_exists = transcription_file.is_file()
+
+    if transcription_file_exists:
+        with open(transcription_file) as f:
+            transcription = json.load(f)
+            return transcription
+    else:
+        return None
 
 
 @app.get("/sessions")
@@ -377,15 +420,77 @@ async def process_sub(
     return {"message": "processing sub matching sub started"}
 
 
-@app.get("/processed/{session_id}")
-async def get_transcription(session_id: str):
-    session_path = storage_path / session_id
-    if session_id in current_process:
-        return current_process[session_id]
+@app.put("/sub/{session_id}")
+async def save_sub(session_id: str, sub_req: SaveSubReq):
+    transcription = get_transcription(session_id)
 
-    with open(session_path / "processed.json", "r") as f:
-        processed = json.load(f)
-        return processed
+    if not transcription:
+        return {"message": "you shouldn't be able to request this brother"}
+
+    transcription_list = transcription["transcription"]
+
+    new_transcription = sub_req.transcription
+
+    for i, sub in enumerate(transcription_list):
+        sub = {
+            **sub,
+            "merge": new_transcription[i].merge,
+            "match": new_transcription[i].match,
+        }
+        transcription_list[i] = sub
+
+    transcription["transcription"] = transcription_list
+
+    session_path = get_session_path(session_id)
+
+    with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
+        json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
+
+    return {"message": "sub transcription updated saved"}
+
+
+@app.get("/sub/{session_id}")
+async def get_sub(session_id: str):
+    transcription = get_transcription(session_id)
+
+    if not transcription:
+        return {"message": "you shouldn't be able to request this brother"}
+
+    return transcription
+
+
+@app.post("/sub/{session_id}")
+async def download_sub(session_id: str):
+    session_path = get_session_path(session_id)
+    transcription = get_transcription(session_id)
+
+    if not transcription:
+        return {"message": "you shouldn't be able to request this brother"}
+
+    transcription_list = transcription["transcription"]
+
+    subs = SSAFile()
+    i = 0
+    while i < len(transcription_list):
+        sub = SSAEvent()
+        sub.start = transcription_list[i]["start_time"]
+
+        if transcription_list[i]["merge"]:
+            while (
+                i + 1 < len(transcription_list) and transcription_list[i + 1]["merge"]
+            ):
+                i += 1
+            sub.end = transcription_list[i]["end_time"]
+
+        sub.text = transcription_list[i]["match"]
+        subs.append()
+
+        i += 1
+
+    final_sub_path = session_path / final_sub_filename
+    subs.save(final_sub_path)
+
+    return FileResponse(final_sub_path)
 
 
 @app.get("/files/{session_id}")
@@ -419,7 +524,7 @@ async def upload_files(
         return {"message": f"that ain't text, but {files[0].filename.split('.')[-1]}"}
 
     if file_type == FileTypes.AUDIO or file_type == FileTypes.ORIGINAL_SUB:
-        ori_files = get_dir_files(session_path / ori_dir_name)
+        ori_files = get_dir_files(session_path / ori_dirname)
 
         if ori_files:
             audio_path = [
@@ -438,14 +543,14 @@ async def upload_files(
             if ori_sub_path and file_type == FileTypes.ORIGINAL_SUB:
                 ori_sub_path[0].unlink()
 
-        await save_upload_file(files[0], session_path / ori_dir_name)
+        await save_upload_file(files[0], session_path / ori_dirname)
 
     if file_type == FileTypes.REF_SUB:
         for file in files:
-            await save_upload_file(file, session_path / ref_sub_dir_name)
+            await save_upload_file(file, session_path / ref_sub_dirname)
 
     if file_type == FileTypes.REF_SUB_MANUAL:
-        with open(session_path / ref_sub_dir_name / "ref_sub.txt", "w") as f:
+        with open(session_path / ref_sub_dirname / manual_ref_sub_filename, "w") as f:
             f.write(sub)
 
     return {"message": "upload success"}
@@ -456,7 +561,7 @@ async def delete_file(session_id: str, file_type: FileTypes, filename: str):
     session_path = get_session_path(session_id)
 
     if file_type == FileTypes.REF_SUB:
-        sub_path = session_path / ref_sub_dir_name / filename
+        sub_path = session_path / ref_sub_dirname / filename
         try:
             sub_path.unlink()
         except Exception as e:
