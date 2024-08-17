@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TypedDict
 
 import jaconv
+import librosa
 import pysubs2
 import whisperx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
@@ -22,6 +23,7 @@ device = "cuda"
 batch_size = 16
 compute_type = "float16"
 storage_path = Path("storage")
+storage_session_path = storage_path / "sessions"
 ref_sub_dirname = "references"
 ori_dirname = "original"
 transcription_filename = "transcription.json"
@@ -50,6 +52,7 @@ class Status(str, Enum):
 class SubMatch(TypedDict):
     score: float
     matched_text: str
+    normalized: str
 
 
 class SubMatches(TypedDict):
@@ -85,19 +88,23 @@ class FileTypes(str, Enum):
 
 
 current_process: dict[str, SessionProcess] = {}
+current_process_err = ""
 
 
-def get_session_path(session_id: str):
-    session_path = storage_path / session_id
+def get_session_path(session_id: str) -> Path:
+    session_path = storage_session_path / session_id
     if not session_path:
         raise HTTPException(status_code=404, detail="Session not found")
-    return storage_path / session_id
+    return storage_session_path / session_id
 
 
 def get_session_files(session_id: str):
     session_path = get_session_path(session_id)
 
     ori_files = get_dir_files(session_path / ori_dirname)
+
+    if not ori_files:
+        return None
 
     audio_path = [
         file
@@ -235,7 +242,13 @@ def match_japanese_string(
         score = fuzz.ratio(t_hira, o_hira)
 
         if score >= threshold:
-            matches.append({"score": score, "matched_text": official})
+            matches.append(
+                {
+                    "score": score,
+                    "matched_text": official,
+                    "normalized": official_normalized,
+                }
+            )
 
     return sorted(matches, key=lambda d: d["score"], reverse=True)
 
@@ -247,117 +260,130 @@ def transcribe_and_match(
     audio_path: Path,
     transcribe: bool = True,
 ):
-    transcription_file = session_path / transcription_filename
-    transcription_file_exists = transcription_file.is_file()
+    try:
+        transcription_file = session_path / transcription_filename
+        transcription_file_exists = transcription_file.is_file()
 
-    if not transcribe and not transcription_file_exists:
-        # how to convey/send this to frontend? this is background task
-        # fe shouldn't allow this, consult to fe
-        print("must transcribe, there is no previous transcription")
-        return
+        if not transcribe and not transcription_file_exists:
+            # how to convey/send this to frontend? this is background task
+            # fe shouldn't allow this, consult to fe
+            print("must transcribe, there is no previous transcription")
+            return
 
-    segments_dir_path = session_path / "segments"
-    session_id = session_path.parts[-1]
-    official_ja_subs = load_ja_sub(ja_sub_paths)
+        segments_dir_path = session_path / "segments"
+        session_id = session_path.parts[-1]
 
-    sub: pysubs2.SSAFile | list[SubMatches] = {}
-
-    use_prev_transcription = not transcribe
-
-    if use_prev_transcription:
-        with open(transcription_file) as f:
-            transcription_content: SessionProcess = json.load(f)
-            sub = transcription_content["transcription"]
-    else:
-        segments_dir_path.mkdir(exist_ok=True)
-        sub = pysubs2.load(eng_sub_path)
-
-    for i, line in enumerate(sub):
-        transcription = ""
-        start_time = ""
-        end_time = ""
-        merge = False
-
-        if use_prev_transcription:
-            transcription = line.text
-            start_time = line.start_time
-            end_time = line.end_time
-            merge = line.merge
-        else:
-            segment_file_path = (
-                segments_dir_path / f"segment_{i}{Path(audio_path).suffix}"
-            )
-            start_time = pysubs2.time.ms_to_str(line.start)
-            end_time = pysubs2.time.ms_to_str(line.end)
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-i",
-                    audio_path.as_posix(),
-                    "-ss",
-                    start_time,
-                    "-to",
-                    end_time,
-                    "-c",
-                    "copy",
-                    segment_file_path,
-                ],
-            )
-
-            whisper_audio = whisperx.load_audio(segment_file_path)
-            result = model.transcribe(
-                whisper_audio, batch_size=batch_size, language="ja"
-            )
-
-            transcription = result["segments"][0]["text"] if result["segments"] else ""
-
-        print(transcription)
-
-        matches = (
-            match_japanese_string(transcription, official_ja_subs, 30)
-            if transcription
-            else []
-        )
-
-        transcription_entry = {
-            "text": transcription,
-            "matches": matches,
-            "start_time": start_time,
-            "end_time": end_time,
-            "merge": merge,
+        current_process[session_id] = {
+            "status": Status.PROCESSING,
         }
 
-        if session_id in current_process:
-            current_process[session_id]["transcription"].append(transcription_entry)
-            current_process[session_id]["processed"] = i + 1
+        official_ja_subs = load_ja_sub(ja_sub_paths)
+
+        sub: pysubs2.SSAFile | list[SubMatches] = {}
+
+        use_prev_transcription = not transcribe
+
+        if use_prev_transcription:
+            with open(transcription_file) as f:
+                transcription_content: SessionProcess = json.load(f)
+                sub = transcription_content["transcription"]
         else:
-            current_process[session_id] = {
-                "status": Status.PROCESSING,
-                "processed": i,
-                "total": len(sub),
-                "ori_sub_path": eng_sub_path,
-                "ref_sub_paths": ja_sub_paths,
-                "transcription": [transcription_entry],
+            segments_dir_path.mkdir(exist_ok=True)
+            sub = pysubs2.load(eng_sub_path)
+
+        audio_duration = librosa.get_duration(path=audio_path)
+
+        for i, line in enumerate(sub):
+            transcription = ""
+            start_time = ""
+            end_time = ""
+            merge = False
+
+            if line.start / 1000 > audio_duration:
+                break
+
+            if use_prev_transcription:
+                transcription = line.text
+                start_time = line.start_time
+                end_time = line.end_time
+                merge = line.merge
+            else:
+                segment_file_path = (
+                    segments_dir_path / f"segment_{i}{Path(audio_path).suffix}"
+                )
+                start_time = line.start
+                end_time = line.end
+                start_time_ffmpeg = pysubs2.time.ms_to_str(line.start)
+                end_time_ffmpeg = pysubs2.time.ms_to_str(line.end)
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        audio_path.as_posix(),
+                        "-ss",
+                        start_time_ffmpeg,
+                        "-to",
+                        end_time_ffmpeg,
+                        "-c",
+                        "copy",
+                        segment_file_path,
+                    ],
+                )
+
+                whisper_audio = whisperx.load_audio(segment_file_path)
+                result = model.transcribe(
+                    whisper_audio, batch_size=batch_size, language="ja"
+                )
+
+                transcription = (
+                    result["segments"][0]["text"] if result["segments"] else ""
+                )
+
+            print(transcription)
+
+            matches = (
+                match_japanese_string(transcription, official_ja_subs, 30)
+                if transcription
+                else []
+            )
+
+            transcription_entry: SubMatches = {
+                "text": transcription,
+                "matches": matches,
+                "start_time": start_time,
+                "end_time": end_time,
+                "merge": merge,
+                "match": None,
             }
 
-        current_process[session_id]["status"] = Status.PROCESSING
+            current_process[session_id]["processed"] = i + 1
 
-    current_process[session_id]["status"] = Status.FINISHED
+            if i == 0:
+                current_process[session_id] = {
+                    "total": len(sub),
+                    "transcription": [transcription_entry],
+                }
+            else:
+                current_process[session_id]["transcription"].append(transcription_entry)
 
-    with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
-        json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
+        current_process[session_id]["status"] = Status.FINISHED
 
-    print("😊😊😊😊😊😊")
+        with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
+            json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
+
+        print("😊😊😊😊😊😊", line.start / 1000, audio_duration)
+    except Exception as e:
+        global current_process_err
+        current_process_err = str(e)
 
 
 def get_transcription(session_id: str) -> SessionProcess | None:
     session_path = get_session_path(session_id)
-    if not session_path:
-        return None
+
     transcription_file = session_path / transcription_filename
     transcription_file_exists = transcription_file.is_file()
 
@@ -371,24 +397,38 @@ def get_transcription(session_id: str) -> SessionProcess | None:
 
 @app.get("/sessions")
 async def get_sessions():
-    session_path = storage_path
-    session_list = [f.path for f in os.scandir(session_path) if f.is_dir()]
+    if not storage_session_path.is_dir():
+        return {"session_list": ""}
+    session_list = [f.path for f in os.scandir(storage_session_path) if f.is_dir()]
     return {"session_list": ", ".join(session_list)}
 
 
 @app.post("/session")
 async def create_session():
     session_id = str(uuid.uuid4())
-    session_path = storage_path / session_id
+    session_path = storage_session_path / session_id
     session_path.mkdir(parents=True, exist_ok=True)
     return {"session_id": session_id}
 
 
 @app.delete("/session/{session_id}")
 async def delete_session(session_id: str):
-    session_path = storage_path / session_id
+    session_path = storage_session_path / session_id
     shutil.rmtree(session_path)
     return {"session_id": session_id}
+
+
+@app.get("/process-sub/{session_id}")
+async def get_processing_status(session_id: str):
+    if session_id in current_process:
+        if current_process_err:
+            raise HTTPException(status_code=409, detail=current_process_err)
+        if current_process[session_id]["status"] == Status.PROCESSING:
+            return {"message": "sub currently being processed"}
+        if current_process[session_id]["status"] == Status.FINISHED:
+            return {"message": "sub processing is finished"}
+    else:
+        return {"message": "start process sub to get status"}
 
 
 @app.post("/process-sub/{session_id}")
@@ -396,6 +436,8 @@ async def process_sub(
     session_id: str,
     background_tasks: BackgroundTasks,
 ):
+    global current_process_err
+    current_process_err = ""
     session_path = get_session_path(session_id)
 
     if (
@@ -482,8 +524,10 @@ async def download_sub(session_id: str):
                 i += 1
             sub.end = transcription_list[i]["end_time"]
 
-        sub.text = transcription_list[i]["match"]
-        subs.append()
+        sub.text = (
+            transcription_list[i]["match"] if transcription_list[i]["match"] else ""
+        )
+        subs.append(sub)
 
         i += 1
 
@@ -497,7 +541,10 @@ async def download_sub(session_id: str):
 async def get_files(session_id: str):
     session_files = get_session_files(session_id)
 
-    return session_files
+    if session_files:
+        return session_files
+    else:
+        return {"message": "all required files must alredy been uploaded"}
 
 
 @app.post("/files/{session_id}/{file_type}")
@@ -509,6 +556,8 @@ async def upload_files(
 ):
     session_path = get_session_path(session_id)
 
+    ORIGINAL_SUB_MAX = 3 * 1024 * 1024
+
     if file_type == FileTypes.REF_SUB_MANUAL and not sub:
         return {"message": "sub manual file must be str aight"}
 
@@ -517,11 +566,19 @@ async def upload_files(
             "message": f"that ain't audio, but {files[0].content_type.split('/')[0]}"
         }
 
-    if (file_type == FileTypes.ORIGINAL_SUB or file_type == FileTypes.REF_SUB) and (
-        files[0].filename.split(".")[-1] != "srt"
-        and files[0].filename.split(".")[-1] != "ass"
-    ):
-        return {"message": f"that ain't text, but {files[0].filename.split('.')[-1]}"}
+    if file_type == FileTypes.ORIGINAL_SUB or file_type == FileTypes.REF_SUB:
+        if (
+            files[0].filename.split(".")[-1] != "srt"
+            and files[0].filename.split(".")[-1] != "ass"
+        ):
+            return {
+                "message": f"that ain't text, but {files[0].filename.split('.')[-1]}"
+            }
+
+        if files[0].size and files[0].size > 2 * 1024 * 1024:
+            return {
+                "message": f"sub file size can't be more than {ORIGINAL_SUB_MAX} bytes"
+            }
 
     if file_type == FileTypes.AUDIO or file_type == FileTypes.ORIGINAL_SUB:
         ori_files = get_dir_files(session_path / ori_dirname)
