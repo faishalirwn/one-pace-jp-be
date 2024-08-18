@@ -523,6 +523,8 @@ async def download_sub(session_id: str):
             ):
                 i += 1
             sub.end = transcription_list[i]["end_time"]
+        else:
+            sub.end = transcription_list[i]["end_time"]
 
         sub.text = (
             transcription_list[i]["match"] if transcription_list[i]["match"] else ""
