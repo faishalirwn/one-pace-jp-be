@@ -101,6 +101,14 @@ class FileTypes(str, Enum):
     REF_SUB_MANUAL = "ref_sub_manual"
 
 
+class Response(BaseModel):
+    message: str
+
+
+class UploadResponse(Response):
+    filename: list[str]
+
+
 current_process: dict[str, SessionProcess] = {}
 current_process_err = ""
 
@@ -410,9 +418,12 @@ def get_transcription(session_id: str) -> SessionProcess | None:
 
 
 @app.post("/test")
-async def test(files: list[UploadFile]):
+async def test(files: list[UploadFile]) -> UploadResponse:
     print(files)
-    return {"session_list": files}
+    filenamesArr = []
+    for file in files:
+        filenamesArr.append(file.filename)
+    return {"message": "poop", "filename": filenamesArr}
 
 
 @app.get("/sessions")
@@ -576,7 +587,7 @@ async def upload_files(
     file_type: FileTypes,
     files: list[UploadFile],
     sub: str | None = None,
-):
+) -> UploadResponse:
     session_path = get_session_path(session_id)
 
     ORIGINAL_SUB_MAX = 3 * 1024 * 1024
