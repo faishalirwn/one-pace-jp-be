@@ -13,6 +13,7 @@ import librosa
 import pysubs2
 import whisperx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fugashi import Tagger
 from pydantic import BaseModel
@@ -32,6 +33,19 @@ manual_ref_sub_filename = "ref_sub.txt"
 model_path = storage_path / "whisperx_models"
 
 app = FastAPI()
+
+origins = [
+    "http://localhost:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 tagger = Tagger()
 
@@ -395,11 +409,18 @@ def get_transcription(session_id: str) -> SessionProcess | None:
         return None
 
 
+@app.post("/test")
+async def test(files: list[UploadFile]):
+    print(files)
+    return {"session_list": files}
+
+
 @app.get("/sessions")
 async def get_sessions():
     if not storage_session_path.is_dir():
         return {"session_list": ""}
     session_list = [f.path for f in os.scandir(storage_session_path) if f.is_dir()]
+    # TODO: response model for all endpoint so gutaiteki response structure shows in swagger api docs
     return {"session_list": ", ".join(session_list)}
 
 
