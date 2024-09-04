@@ -12,7 +12,7 @@ import jaconv
 import librosa
 import pysubs2
 import whisperx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fugashi import Tagger
@@ -585,34 +585,42 @@ async def get_files(session_id: str):
 async def upload_files(
     session_id: str,
     file_type: FileTypes,
-    files: list[UploadFile],
+    files: list[UploadFile] | None = None,
     sub: str | None = None,
 ) -> UploadResponse:
     session_path = get_session_path(session_id)
 
+    uploaded_files = []
+
     ORIGINAL_SUB_MAX = 3 * 1024 * 1024
 
     if file_type == FileTypes.REF_SUB_MANUAL and not sub:
-        return {"message": "sub manual file must be str aight"}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sub manual file must be str aight.",
+        )
+
+    if file_type == FileTypes.REF_SUB_MANUAL:
+        print(sub, type(sub))
 
     if file_type == FileTypes.AUDIO and files[0].content_type.split("/")[0] != "audio":
-        return {
-            "message": f"that ain't audio, but {files[0].content_type.split('/')[0]}"
-        }
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"That ain't audio, but {files[0].content_type.split('/')[0]}.",
+        )
 
     if file_type == FileTypes.ORIGINAL_SUB or file_type == FileTypes.REF_SUB:
-        if (
-            files[0].filename.split(".")[-1] != "srt"
-            and files[0].filename.split(".")[-1] != "ass"
-        ):
-            return {
-                "message": f"that ain't text, but {files[0].filename.split('.')[-1]}"
-            }
+        if files[0].filename.split(".")[-1] not in ["srt", "ass"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"That ain't text, but {files[0].filename.split('.')[-1]}.",
+            )
 
         if files[0].size and files[0].size > 2 * 1024 * 1024:
-            return {
-                "message": f"sub file size can't be more than {ORIGINAL_SUB_MAX} bytes"
-            }
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Sub file size can't be more than {ORIGINAL_SUB_MAX} bytes.",
+            )
 
     if file_type == FileTypes.AUDIO or file_type == FileTypes.ORIGINAL_SUB:
         ori_files = get_dir_files(session_path / ori_dirname)
@@ -635,16 +643,19 @@ async def upload_files(
                 ori_sub_path[0].unlink()
 
         await save_upload_file(files[0], session_path / ori_dirname)
+        uploaded_files.append(files[0].filename)
 
     if file_type == FileTypes.REF_SUB:
         for file in files:
             await save_upload_file(file, session_path / ref_sub_dirname)
+            uploaded_files.append(file.filename)
 
     if file_type == FileTypes.REF_SUB_MANUAL:
         with open(session_path / ref_sub_dirname / manual_ref_sub_filename, "w") as f:
             f.write(sub)
+            uploaded_files.append(manual_ref_sub_filename)
 
-    return {"message": "upload success"}
+    return UploadResponse(message="upload success", filename=uploaded_files)
 
 
 @app.delete("/files/{session_id}/{file_type}")
