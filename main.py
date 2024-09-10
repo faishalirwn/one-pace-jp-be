@@ -109,6 +109,10 @@ class UploadResponse(Response):
     filename: list[str]
 
 
+class SessionListResponse(Response):
+    session_list: list[str]
+
+
 current_process: dict[str, SessionProcess] = {}
 current_process_err = ""
 
@@ -427,12 +431,12 @@ async def test(files: list[UploadFile]) -> UploadResponse:
 
 
 @app.get("/sessions")
-async def get_sessions():
+async def get_sessions() -> SessionListResponse:
     if not storage_session_path.is_dir():
         return {"session_list": ""}
-    session_list = [f.path for f in os.scandir(storage_session_path) if f.is_dir()]
+    session_list = [f.name for f in os.scandir(storage_session_path) if f.is_dir()]
     # TODO: response model for all endpoint so gutaiteki response structure shows in swagger api docs
-    return {"session_list": ", ".join(session_list)}
+    return {"message": "Success", "session_list": session_list}
 
 
 @app.post("/session")
