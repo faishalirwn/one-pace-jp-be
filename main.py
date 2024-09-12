@@ -102,7 +102,7 @@ class FileTypes(str, Enum):
 
 
 class Response(BaseModel):
-    message: str
+    message: str = "Success"
 
 
 class UploadResponse(Response):
@@ -113,13 +113,17 @@ class SessionListResponse(Response):
     session_list: list[str]
 
 
+class SessionIdResponse(Response):
+    session_id: str
+
+
 current_process: dict[str, SessionProcess] = {}
 current_process_err = ""
 
 
 def get_session_path(session_id: str) -> Path:
     session_path = storage_session_path / session_id
-    if not session_path:
+    if not session_path.is_dir():
         raise HTTPException(status_code=404, detail="Session not found")
     return storage_session_path / session_id
 
@@ -427,7 +431,7 @@ async def test(files: list[UploadFile]) -> UploadResponse:
     filenamesArr = []
     for file in files:
         filenamesArr.append(file.filename)
-    return {"message": "poop", "filename": filenamesArr}
+    return {"filename": filenamesArr}
 
 
 @app.get("/sessions")
@@ -436,11 +440,11 @@ async def get_sessions() -> SessionListResponse:
         return {"session_list": ""}
     session_list = [f.name for f in os.scandir(storage_session_path) if f.is_dir()]
     # TODO: response model for all endpoint so gutaiteki response structure shows in swagger api docs
-    return {"message": "Success", "session_list": session_list}
+    return {"session_list": session_list}
 
 
 @app.post("/session")
-async def create_session():
+async def create_session() -> SessionIdResponse:
     session_id = str(uuid.uuid4())
     session_path = storage_session_path / session_id
     session_path.mkdir(parents=True, exist_ok=True)
