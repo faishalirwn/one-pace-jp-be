@@ -12,7 +12,15 @@ import jaconv
 import librosa
 import pysubs2
 import whisperx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fugashi import Tagger
@@ -117,6 +125,10 @@ class SessionIdResponse(Response):
     session_id: str
 
 
+class FilesResponse(Response):
+    files: dict[FileTypes, str]
+
+
 current_process: dict[str, SessionProcess] = {}
 current_process_err = ""
 
@@ -128,7 +140,7 @@ def get_session_path(session_id: str) -> Path:
     return storage_session_path / session_id
 
 
-def get_session_files(session_id: str):
+def get_session_files(session_id: str, filename: bool = False):
     session_path = get_session_path(session_id)
 
     ori_files = get_dir_files(session_path / ori_dirname)
@@ -152,11 +164,21 @@ def get_session_files(session_id: str):
     if not ref_subs_path or not audio_path or not ori_sub_path:
         return None
     else:
-        return {
-            "audio_path": audio_path[0],
-            "ori_sub_path": ori_sub_path[0],
-            "ref_subs_path": ref_subs_path,
-        }
+        if filename:
+            ref_sub_files = []
+            for path in ref_subs_path:
+                ref_sub_files.append(path.name)
+            return {
+                FileTypes.AUDIO: audio_path[0].name,
+                FileTypes.ORIGINAL_SUB: ori_sub_path[0].name,
+                FileTypes.REF_SUB: ",".join(ref_sub_files),
+            }
+        else:
+            return {
+                "audio_path": audio_path[0],
+                "ori_sub_path": ori_sub_path[0],
+                "ref_subs_path": ref_subs_path,
+            }
 
 
 def get_dir_files(dir_path: Path):
@@ -580,11 +602,11 @@ async def download_sub(session_id: str):
 
 
 @app.get("/files/{session_id}")
-async def get_files(session_id: str):
+async def get_files(session_id: str) -> FilesResponse:
     session_files = get_session_files(session_id)
 
     if session_files:
-        return session_files
+        return {"files": session_files}
     else:
         return {"message": "all required files must alredy been uploaded"}
 
@@ -593,8 +615,8 @@ async def get_files(session_id: str):
 async def upload_files(
     session_id: str,
     file_type: FileTypes,
-    files: list[UploadFile] | None = None,
-    sub: str | None = None,
+    files: list[UploadFile] = File(None),
+    sub: str = Form(None),
 ) -> UploadResponse:
     session_path = get_session_path(session_id)
 
@@ -607,9 +629,6 @@ async def upload_files(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Sub manual file must be str aight.",
         )
-
-    if file_type == FileTypes.REF_SUB_MANUAL:
-        print(sub, type(sub))
 
     if file_type == FileTypes.AUDIO and files[0].content_type.split("/")[0] != "audio":
         raise HTTPException(
