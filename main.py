@@ -86,7 +86,7 @@ class SubMatches(TypedDict):
     merge: bool
 
 
-class SessionProcess(TypedDict):
+class SessionProcess(BaseModel):
     transcription: list[SubMatches]
     status: Status
     processed: int
@@ -125,8 +125,21 @@ class SessionIdResponse(Response):
     session_id: str
 
 
+class SessionFiles(BaseModel):
+    files: dict[FileTypes, str | Path]
+
+
 class FilesResponse(Response):
-    files: dict[FileTypes, str]
+    files: dict[FileTypes, str] = {
+        FileTypes.AUDIO: "",
+        FileTypes.ORIGINAL_SUB: "",
+        FileTypes.REF_SUB: "",
+        FileTypes.REF_SUB_MANUAL: "",
+    }
+
+
+class TranscriptionResponse(Response):
+    transcription: SessionProcess | None
 
 
 current_process: dict[str, SessionProcess] = {}
@@ -140,7 +153,7 @@ def get_session_path(session_id: str) -> Path:
     return storage_session_path / session_id
 
 
-def get_session_files(session_id: str, filename: bool = False):
+def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
     session_path = get_session_path(session_id)
 
     ori_files = get_dir_files(session_path / ori_dirname)
@@ -152,14 +165,15 @@ def get_session_files(session_id: str, filename: bool = False):
         file
         for file in ori_files
         if mimetypes.guess_type(file)[0].split("/")[0] == "audio"
-    ]
+    ][0]
     ori_sub_path = [
         file
         for file in ori_files
         if mimetypes.guess_type(file)[0].split("/")[0] == "text"
-    ]
+    ][0]
 
     ref_subs_path = get_dir_files(session_path / ref_sub_dirname)
+    ref_sub_manual_path = session_path / ref_sub_dirname / manual_ref_sub_filename
 
     if not ref_subs_path or not audio_path or not ori_sub_path:
         return None
@@ -168,17 +182,24 @@ def get_session_files(session_id: str, filename: bool = False):
             ref_sub_files = []
             for path in ref_subs_path:
                 ref_sub_files.append(path.name)
-            return {
-                FileTypes.AUDIO: audio_path[0].name,
-                FileTypes.ORIGINAL_SUB: ori_sub_path[0].name,
-                FileTypes.REF_SUB: ",".join(ref_sub_files),
-            }
+            # TODO: manual sub, transcribt match n oman ula sub
+            return SessionFiles(
+                files={
+                    FileTypes.AUDIO: audio_path.name,
+                    FileTypes.ORIGINAL_SUB: ori_sub_path.name,
+                    FileTypes.REF_SUB: ",".join(ref_sub_files),
+                    FileTypes.REF_SUB_MANUAL: manual_ref_sub_filename,
+                }
+            )
         else:
-            return {
-                "audio_path": audio_path[0],
-                "ori_sub_path": ori_sub_path[0],
-                "ref_subs_path": ref_subs_path,
-            }
+            return SessionFiles(
+                files={
+                    FileTypes.AUDIO: audio_path,
+                    FileTypes.ORIGINAL_SUB: ori_sub_path,
+                    FileTypes.REF_SUB: ref_subs_path,
+                    FileTypes.REF_SUB_MANUAL: ref_sub_manual_path,
+                }
+            )
 
 
 def get_dir_files(dir_path: Path):
@@ -257,11 +278,21 @@ def load_ja_sub(ja_sub_paths: Path | list[Path]) -> list[str]:
     all_subs = []
     if isinstance(ja_sub_paths, list):
         for file in ja_sub_paths:
-            subs = pysubs2.load(file)
-            all_subs.extend([sub.text for sub in subs])
+            if file.name == manual_ref_sub_filename:
+                with open(file, "r") as f:
+                    for line in f:
+                        all_subs.append(line.rstrip())
+            else:
+                subs = pysubs2.load(file)
+                all_subs.extend([sub.text for sub in subs])
     else:
-        subs = pysubs2.load(ja_sub_paths)
-        all_subs.extend([sub.text for sub in subs])
+        if file.name == manual_ref_sub_filename:
+            with open(file, "r") as f:
+                for line in f:
+                    all_subs.append(line.rstrip())
+        else:
+            subs = pysubs2.load(ja_sub_paths)
+            all_subs.extend([sub.text for sub in subs])
     return all_subs
 
 
@@ -317,8 +348,6 @@ def transcribe_and_match(
         transcription_file_exists = transcription_file.is_file()
 
         if not transcribe and not transcription_file_exists:
-            # how to convey/send this to frontend? this is background task
-            # fe shouldn't allow this, consult to fe
             print("must transcribe, there is no previous transcription")
             return
 
@@ -459,10 +488,17 @@ async def test(files: list[UploadFile]) -> UploadResponse:
 @app.get("/sessions")
 async def get_sessions() -> SessionListResponse:
     if not storage_session_path.is_dir():
-        return {"session_list": ""}
+        return SessionListResponse(session_list="")
     session_list = [f.name for f in os.scandir(storage_session_path) if f.is_dir()]
-    # TODO: response model for all endpoint so gutaiteki response structure shows in swagger api docs
-    return {"session_list": session_list}
+    return SessionListResponse(session_list=session_list)
+
+
+@app.get("/sessions/{session_id}")
+async def get_is_session_exist(session_id: str) -> Response:
+    session_path = get_session_path(session_id)
+    # no else because already dealt with by get_session_path, idk if it's the right approach
+    if session_path:
+        return Response(message="true")
 
 
 @app.post("/session")
@@ -470,7 +506,7 @@ async def create_session() -> SessionIdResponse:
     session_id = str(uuid.uuid4())
     session_path = storage_session_path / session_id
     session_path.mkdir(parents=True, exist_ok=True)
-    return {"session_id": session_id}
+    return SessionIdResponse(session_id=session_id)
 
 
 @app.delete("/session/{session_id}")
@@ -508,14 +544,16 @@ async def process_sub(
     ):
         raise HTTPException(status_code=409, detail="File is currently being processed")
 
-    session_files = get_session_files(session_id)
+    session_files = get_session_files(session_id).files
 
     if not session_files:
         return {"message": "submit required files"}
 
-    audio_path = session_files["audio_path"]
-    eng_sub_path = session_files["ori_sub_path"]
-    ja_sub_paths = session_files["ref_subs_path"]
+    audio_path = session_files[FileTypes.AUDIO]
+    eng_sub_path = session_files[FileTypes.ORIGINAL_SUB]
+    ja_sub_paths = (
+        session_files[FileTypes.REF_SUB] + session_files[FileTypes.REF_SUB_MANUAL]
+    )
 
     background_tasks.add_task(
         transcribe_and_match, session_path, ja_sub_paths, eng_sub_path, audio_path
@@ -554,13 +592,15 @@ async def save_sub(session_id: str, sub_req: SaveSubReq):
 
 
 @app.get("/sub/{session_id}")
-async def get_sub(session_id: str):
+async def get_sub(session_id: str) -> TranscriptionResponse:
     transcription = get_transcription(session_id)
 
     if not transcription:
-        return {"message": "you shouldn't be able to request this brother"}
+        return TranscriptionResponse(
+            message="you shouldn't be able to request this brother"
+        )
 
-    return transcription
+    return TranscriptionResponse(transcription=transcription)
 
 
 @app.post("/sub/{session_id}")
@@ -603,12 +643,12 @@ async def download_sub(session_id: str):
 
 @app.get("/files/{session_id}")
 async def get_files(session_id: str) -> FilesResponse:
-    session_files = get_session_files(session_id)
+    session_files = get_session_files(session_id, filename=True).files
 
     if session_files:
-        return {"files": session_files}
+        return FilesResponse(files=session_files)
     else:
-        return {"message": "all required files must alredy been uploaded"}
+        return FilesResponse(message="all required files must alredy been uploaded")
 
 
 @app.post("/files/{session_id}/{file_type}")
