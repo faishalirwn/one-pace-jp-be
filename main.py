@@ -146,11 +146,11 @@ current_process: dict[str, SessionProcess] = {}
 current_process_err = ""
 
 
-def get_session_path(session_id: str) -> Path:
+def get_session_path(session_id: str) -> Path | None:
     session_path = storage_session_path / session_id
     if not session_path.is_dir():
-        raise HTTPException(status_code=404, detail="Session not found")
-    return storage_session_path / session_id
+        return None
+    return session_path
 
 
 def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
@@ -202,7 +202,7 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
             )
 
 
-def get_dir_files(dir_path: Path):
+def get_dir_files(dir_path: Path | None):
     try:
         flist = [p for p in Path(dir_path).iterdir() if p.is_file()]
     except Exception:
@@ -494,11 +494,12 @@ async def get_sessions() -> SessionListResponse:
 
 
 @app.get("/sessions/{session_id}")
-async def get_is_session_exist(session_id: str) -> Response:
+async def get_is_session_exist(session_id: str) -> SessionIdResponse:
     session_path = get_session_path(session_id)
-    # no else because already dealt with by get_session_path, idk if it's the right approach
     if session_path:
-        return Response(message="true")
+        return SessionIdResponse(session_id=session_path.name)
+    else:
+        return SessionIdResponse(session_id="", message="Session doesn't exist")
 
 
 @app.post("/session")
