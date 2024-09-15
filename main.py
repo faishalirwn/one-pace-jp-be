@@ -368,9 +368,9 @@ def transcribe_and_match(
         segments_dir_path = session_path / "segments"
         session_id = session_path.parts[-1]
 
-        current_process[session_id] = {
-            "status": Status.PROCESSING,
-        }
+        print(session_id, "transcribe_and_match started....")
+
+        current_process[session_id] = {"status": Status.PROCESSING}
 
         official_ja_subs = load_ja_sub(ja_sub_paths)
 
@@ -388,6 +388,7 @@ def transcribe_and_match(
 
         audio_duration = librosa.get_duration(path=audio_path)
 
+        print(session_id, "for i, line in enumerate(sub):....")
         for i, line in enumerate(sub):
             transcription = ""
             start_time = ""
@@ -438,7 +439,8 @@ def transcribe_and_match(
                     result["segments"][0]["text"] if result["segments"] else ""
                 )
 
-            print(transcription)
+            # display transcription line by line to see if the process is running
+            print("😊", transcription)
 
             matches = (
                 match_japanese_string(transcription, official_ja_subs, 30)
@@ -458,10 +460,8 @@ def transcribe_and_match(
             current_process[session_id]["processed"] = i + 1
 
             if i == 0:
-                current_process[session_id] = {
-                    "total": len(sub),
-                    "transcription": [transcription_entry],
-                }
+                current_process[session_id]["total"] = len(sub)
+                current_process[session_id]["transcription"] = [transcription_entry]
             else:
                 current_process[session_id]["transcription"].append(transcription_entry)
 
@@ -473,6 +473,7 @@ def transcribe_and_match(
     except Exception as e:
         global current_process_err
         current_process_err = str(e)
+        print(e)
 
 
 def get_transcription(session_id: str) -> SessionProcess | None:
@@ -487,6 +488,16 @@ def get_transcription(session_id: str) -> SessionProcess | None:
             return transcription
     else:
         return None
+
+
+def is_session_processing(session_id: str) -> bool:
+    if (
+        session_id in current_process
+        and current_process[session_id]["status"] == Status.PROCESSING
+    ):
+        return True
+    else:
+        return False
 
 
 @app.post("/test")
@@ -553,7 +564,6 @@ async def get_processing_status(session_id: str) -> StatusResponse:
                 message="Start process sub to get status", status=Status.NOT_STARTED
             )
 
-        print("🎴", transcription)
         return StatusResponse(status=transcription["status"])
 
 
@@ -566,16 +576,15 @@ async def process_sub(
     current_process_err = ""
     session_path = get_session_path(session_id)
 
-    if (
-        session_id in current_process
-        and current_process[session_id]["status"] == Status.PROCESSING
-    ):
+    if is_session_processing(session_id):
         raise HTTPException(status_code=409, detail="File is currently being processed")
 
     session_files = get_session_files(session_id).files
 
     if not session_files:
-        return Response(message="submit required files")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="submit required files"
+        )
 
     audio_path = session_files[FileTypes.AUDIO]
     eng_sub_path = session_files[FileTypes.ORIGINAL_SUB]
@@ -687,11 +696,10 @@ async def upload_files(
     files: list[UploadFile] = File(None),
     sub: str = Form(None),
 ) -> UploadResponse:
-    session_path = get_session_path(session_id)
-
-    uploaded_files = []
-
     ORIGINAL_SUB_MAX = 3 * 1024 * 1024
+
+    if is_session_processing(session_id):
+        raise HTTPException(status_code=409, detail="File is currently being processed")
 
     if file_type == FileTypes.REF_SUB_MANUAL and not sub:
         raise HTTPException(
@@ -717,6 +725,10 @@ async def upload_files(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"Sub file size can't be more than {ORIGINAL_SUB_MAX} bytes.",
             )
+
+    session_path = get_session_path(session_id)
+
+    uploaded_files = []
 
     if file_type == FileTypes.AUDIO or file_type == FileTypes.ORIGINAL_SUB:
         ori_files = get_dir_files(session_path / ori_dirname)
