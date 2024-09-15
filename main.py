@@ -67,8 +67,9 @@ model = whisperx.load_model(
 
 
 class Status(str, Enum):
-    PROCESSING = "Processing"
-    FINISHED = "Finished"
+    PROCESSING = "processing"
+    FINISHED = "finished"
+    NOT_STARTED = "not_started"
 
 
 class SubMatch(TypedDict):
@@ -113,6 +114,10 @@ class Response(BaseModel):
     message: str = "Success"
 
 
+class StatusResponse(Response):
+    status: Status
+
+
 class UploadResponse(Response):
     filename: list[str]
 
@@ -126,7 +131,7 @@ class SessionIdResponse(Response):
 
 
 class SessionFiles(BaseModel):
-    files: dict[FileTypes, str | Path]
+    files: dict[FileTypes, str | Path | list[Path] | None]
 
 
 class FilesResponse(Response):
@@ -174,6 +179,15 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
 
     ref_subs_path = get_dir_files(session_path / ref_sub_dirname)
     ref_sub_manual_path = session_path / ref_sub_dirname / manual_ref_sub_filename
+    ref_sub_manual_name = ""
+    if not ref_sub_manual_path.is_file():
+        ref_sub_manual_path = None
+    else:
+        ref_sub_manual_name = []
+        with open(ref_sub_manual_path, "r") as f:
+            for line in f:
+                ref_sub_manual_name.append(line.rstrip())
+        ref_sub_manual_name = "\n".join(ref_sub_manual_name)
 
     if not ref_subs_path or not audio_path or not ori_sub_path:
         return None
@@ -188,7 +202,7 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
                     FileTypes.AUDIO: audio_path.name,
                     FileTypes.ORIGINAL_SUB: ori_sub_path.name,
                     FileTypes.REF_SUB: ",".join(ref_sub_files),
-                    FileTypes.REF_SUB_MANUAL: manual_ref_sub_filename,
+                    FileTypes.REF_SUB_MANUAL: ref_sub_manual_name,
                 }
             )
         else:
@@ -286,7 +300,7 @@ def load_ja_sub(ja_sub_paths: Path | list[Path]) -> list[str]:
                 subs = pysubs2.load(file)
                 all_subs.extend([sub.text for sub in subs])
     else:
-        if file.name == manual_ref_sub_filename:
+        if ja_sub_paths.name == manual_ref_sub_filename:
             with open(file, "r") as f:
                 for line in f:
                     all_subs.append(line.rstrip())
@@ -456,7 +470,6 @@ def transcribe_and_match(
         with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
             json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
 
-        print("😊😊😊😊😊😊", line.start / 1000, audio_duration)
     except Exception as e:
         global current_process_err
         current_process_err = str(e)
@@ -518,23 +531,37 @@ async def delete_session(session_id: str):
 
 
 @app.get("/process-sub/{session_id}")
-async def get_processing_status(session_id: str):
+async def get_processing_status(session_id: str) -> StatusResponse:
     if session_id in current_process:
         if current_process_err:
+            print("💀", current_process_err)
             raise HTTPException(status_code=409, detail=current_process_err)
         if current_process[session_id]["status"] == Status.PROCESSING:
-            return {"message": "sub currently being processed"}
+            return StatusResponse(
+                message="Sub is currently being processed. Please wait...",
+                status=Status.PROCESSING,
+            )
         if current_process[session_id]["status"] == Status.FINISHED:
-            return {"message": "sub processing is finished"}
+            return StatusResponse(
+                message="Sub processing is finished", status=Status.FINISHED
+            )
     else:
-        return {"message": "start process sub to get status"}
+        transcription = get_transcription(session_id)
+
+        if not transcription:
+            return StatusResponse(
+                message="Start process sub to get status", status=Status.NOT_STARTED
+            )
+
+        print("🎴", transcription)
+        return StatusResponse(status=transcription["status"])
 
 
 @app.post("/process-sub/{session_id}")
 async def process_sub(
     session_id: str,
     background_tasks: BackgroundTasks,
-):
+) -> Response:
     global current_process_err
     current_process_err = ""
     session_path = get_session_path(session_id)
@@ -548,19 +575,20 @@ async def process_sub(
     session_files = get_session_files(session_id).files
 
     if not session_files:
-        return {"message": "submit required files"}
+        return Response(message="submit required files")
 
     audio_path = session_files[FileTypes.AUDIO]
     eng_sub_path = session_files[FileTypes.ORIGINAL_SUB]
-    ja_sub_paths = (
-        session_files[FileTypes.REF_SUB] + session_files[FileTypes.REF_SUB_MANUAL]
-    )
+    ja_sub_paths = session_files[FileTypes.REF_SUB]
+
+    if session_files[FileTypes.REF_SUB_MANUAL]:
+        ja_sub_paths.append(session_files[FileTypes.REF_SUB_MANUAL])
 
     background_tasks.add_task(
         transcribe_and_match, session_path, ja_sub_paths, eng_sub_path, audio_path
     )
 
-    return {"message": "processing sub matching sub started"}
+    return Response(message="processing sub matching sub started")
 
 
 @app.put("/sub/{session_id}")
