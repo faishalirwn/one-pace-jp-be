@@ -81,6 +81,7 @@ class SubMatch(TypedDict):
 class SubMatches(TypedDict):
     start_time: str
     end_time: str
+    ori_text: str
     text: str
     matches: list[SubMatch]
     match: str | None
@@ -393,6 +394,7 @@ def transcribe_and_match(
             transcription = ""
             start_time = ""
             end_time = ""
+            ori_text = ""
             merge = False
 
             if line.start / 1000 > audio_duration:
@@ -403,12 +405,14 @@ def transcribe_and_match(
                 start_time = line.start_time
                 end_time = line.end_time
                 merge = line.merge
+                ori_text = line.ori_text
             else:
                 segment_file_path = (
                     segments_dir_path / f"segment_{i}{Path(audio_path).suffix}"
                 )
                 start_time = line.start
                 end_time = line.end
+                ori_text = line.text
                 start_time_ffmpeg = pysubs2.time.ms_to_str(line.start)
                 end_time_ffmpeg = pysubs2.time.ms_to_str(line.end)
                 subprocess.run(
@@ -455,6 +459,7 @@ def transcribe_and_match(
                 "end_time": end_time,
                 "merge": merge,
                 "match": None,
+                "ori_text": ori_text,
             }
 
             current_process[session_id]["processed"] = i + 1
@@ -498,15 +503,6 @@ def is_session_processing(session_id: str) -> bool:
         return True
     else:
         return False
-
-
-@app.post("/test")
-async def test(files: list[UploadFile]) -> UploadResponse:
-    print(files)
-    filenamesArr = []
-    for file in files:
-        filenamesArr.append(file.filename)
-    return {"filename": filenamesArr}
 
 
 @app.get("/sessions")
