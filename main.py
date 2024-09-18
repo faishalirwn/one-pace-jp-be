@@ -97,7 +97,7 @@ class SessionProcess(BaseModel):
 
 class SubMatchesPartial(BaseModel):
     match: str | None
-    merge: bool
+    merge: bool = False
 
 
 class SaveSubReq(BaseModel):
@@ -361,6 +361,14 @@ def transcribe_and_match(
     audio_path: Path,
     transcribe: bool = True,
 ):
+    def remove_duplicates(matches):
+        seen = set()
+        return [
+            x
+            for x in matches
+            if not (x["matched_text"] in seen or seen.add(x["matched_text"]))
+        ]
+
     try:
         transcription_file = session_path / transcription_filename
         transcription_file_exists = transcription_file.is_file()
@@ -461,7 +469,7 @@ def transcribe_and_match(
 
             transcription_entry: SubMatches = {
                 "text": transcription,
-                "matches": matches,
+                "matches": remove_duplicates(matches),
                 "start_time": start_time,
                 "end_time": end_time,
                 "merge": merge,
@@ -618,11 +626,11 @@ async def process_sub(
 
 
 @app.put("/sub/{session_id}")
-async def save_sub(session_id: str, sub_req: SaveSubReq):
+async def save_sub(session_id: str, sub_req: SaveSubReq) -> Response:
     transcription = get_transcription(session_id)
 
     if not transcription:
-        return {"message": "you shouldn't be able to request this brother"}
+        return Response(message="you shouldn't be able to request this brother")
 
     transcription_list = transcription["transcription"]
 
@@ -643,7 +651,7 @@ async def save_sub(session_id: str, sub_req: SaveSubReq):
     with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
         json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
 
-    return {"message": "sub transcription updated saved"}
+    return Response(message="sub transcription updated saved")
 
 
 @app.get("/sub/{session_id}")
