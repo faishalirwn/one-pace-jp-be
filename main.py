@@ -142,7 +142,6 @@ class FilesResponse(Response):
         FileTypes.AUDIO: "",
         FileTypes.ORIGINAL_SUB: "",
         FileTypes.REF_SUB: "",
-        FileTypes.REF_SUB_MANUAL: "",
     }
 
 
@@ -181,8 +180,13 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
     ][0]
 
     ref_subs_path = get_dir_files(session_path / ref_sub_dirname)
+
+    ref_subs = [file for file in ref_subs_path if file.suffix in [".srt", ".ass"]]
+    ref_subs_string = ",".join([ref_sub.stem for ref_sub in ref_subs])
+
     ref_sub_manual_path = session_path / ref_sub_dirname / manual_ref_sub_filename
     ref_sub_manual_name = ""
+
     if not ref_sub_manual_path.is_file():
         ref_sub_manual_path = None
     else:
@@ -196,15 +200,12 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
         return None
     else:
         if filename:
-            ref_sub_files = []
-            for path in ref_subs_path:
-                ref_sub_files.append(path.name)
             # TODO: manual sub, transcribt match n oman ula sub
             return SessionFiles(
                 files={
                     FileTypes.AUDIO: audio_path.name,
                     FileTypes.ORIGINAL_SUB: ori_sub_path.name,
-                    FileTypes.REF_SUB: ",".join(ref_sub_files),
+                    FileTypes.REF_SUB: ref_subs_string,
                     FileTypes.REF_SUB_MANUAL: ref_sub_manual_name,
                 }
             )
@@ -213,7 +214,7 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
                 files={
                     FileTypes.AUDIO: audio_path,
                     FileTypes.ORIGINAL_SUB: ori_sub_path,
-                    FileTypes.REF_SUB: ref_subs_path,
+                    FileTypes.REF_SUB: ref_subs,
                     FileTypes.REF_SUB_MANUAL: ref_sub_manual_path,
                 }
             )
@@ -698,6 +699,7 @@ async def download_sub(session_id: str):
 @app.get("/files/{session_id}")
 async def get_files(session_id: str) -> FilesResponse:
     session_files = get_session_files(session_id, filename=True).files
+    session_files.pop(FileTypes.REF_SUB_MANUAL, None)
 
     if session_files:
         return FilesResponse(files=session_files)
@@ -747,7 +749,8 @@ async def upload_files(
     uploaded_files = []
 
     if file_type == FileTypes.AUDIO or file_type == FileTypes.ORIGINAL_SUB:
-        ori_files = get_dir_files(session_path / ori_dirname)
+        ori_dir = session_path / ori_dirname
+        ori_files = get_dir_files(ori_dir)
 
         if ori_files:
             audio_path = [
@@ -766,12 +769,20 @@ async def upload_files(
             if ori_sub_path and file_type == FileTypes.ORIGINAL_SUB:
                 ori_sub_path[0].unlink()
 
-        await save_upload_file(files[0], session_path / ori_dirname)
+        await save_upload_file(files[0], ori_dir)
         uploaded_files.append(files[0].filename)
 
     if file_type == FileTypes.REF_SUB:
+        ref_dir = session_path / ref_sub_dirname
+        ref_files = get_dir_files(ref_dir)
+
+        ref_subs_path = [file for file in ref_files if file.suffix in [".srt", ".ass"]]
+
+        for ref_subs in ref_subs_path:
+            ref_subs.unlink()
+
         for file in files:
-            await save_upload_file(file, session_path / ref_sub_dirname)
+            await save_upload_file(file, ref_dir)
             uploaded_files.append(file.filename)
 
     if file_type == FileTypes.REF_SUB_MANUAL:
@@ -780,18 +791,3 @@ async def upload_files(
             uploaded_files.append(manual_ref_sub_filename)
 
     return UploadResponse(message="upload success", filename=uploaded_files)
-
-
-@app.delete("/files/{session_id}/{file_type}")
-async def delete_file(session_id: str, file_type: FileTypes, filename: str):
-    session_path = get_session_path(session_id)
-
-    if file_type == FileTypes.REF_SUB:
-        sub_path = session_path / ref_sub_dirname / filename
-        try:
-            sub_path.unlink()
-        except Exception as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        return {"message": f"{filename} deleted"}
-
-    return {"message": "not ref sub file can't delete'"}
