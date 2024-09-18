@@ -649,7 +649,7 @@ async def save_sub(session_id: str, sub_req: SaveSubReq) -> Response:
     session_path = get_session_path(session_id)
 
     with open(session_path / transcription_filename, "w", encoding="utf-8") as f:
-        json.dump(current_process[session_id], f, ensure_ascii=False, indent=4)
+        json.dump(transcription, f, ensure_ascii=False, indent=4)
 
     return Response(message="sub transcription updated saved")
 
