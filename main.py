@@ -117,6 +117,8 @@ class Response(BaseModel):
 
 class StatusResponse(Response):
     status: Status
+    processed: int
+    total: int
 
 
 class UploadResponse(Response):
@@ -371,7 +373,11 @@ def transcribe_and_match(
 
         print(session_id, "transcribe_and_match started....")
 
-        current_process[session_id] = {"status": Status.PROCESSING}
+        current_process[session_id] = {
+            "status": Status.PROCESSING,
+            "processed": 0,
+            "total": 0,
+        }
 
         official_ja_subs = load_ja_sub(ja_sub_paths)
 
@@ -547,20 +553,32 @@ async def get_processing_status(session_id: str) -> StatusResponse:
             return StatusResponse(
                 message="Sub is currently being processed. Please wait...",
                 status=Status.PROCESSING,
+                processed=current_process[session_id]["processed"],
+                total=current_process[session_id]["total"],
             )
         if current_process[session_id]["status"] == Status.FINISHED:
             return StatusResponse(
-                message="Sub processing is finished", status=Status.FINISHED
+                message="Sub processing is finished",
+                status=Status.FINISHED,
+                processed=current_process[session_id]["processed"],
+                total=current_process[session_id]["total"],
             )
     else:
         transcription = get_transcription(session_id)
 
         if not transcription:
             return StatusResponse(
-                message="Start process sub to get status", status=Status.NOT_STARTED
+                message="Start process sub to get status",
+                status=Status.NOT_STARTED,
+                processed=0,
+                total=0,
             )
 
-        return StatusResponse(status=transcription["status"])
+        return StatusResponse(
+            status=transcription["status"],
+            processed=transcription["processed"],
+            total=transcription["total"],
+        )
 
 
 @app.post("/process-sub/{session_id}")
