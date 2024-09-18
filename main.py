@@ -185,16 +185,16 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
     ref_subs_string = ",".join([ref_sub.stem for ref_sub in ref_subs])
 
     ref_sub_manual_path = session_path / ref_sub_dirname / manual_ref_sub_filename
-    ref_sub_manual_name = ""
+    ref_sub_manual_content = ""
 
     if not ref_sub_manual_path.is_file():
         ref_sub_manual_path = None
     else:
-        ref_sub_manual_name = []
+        ref_sub_manual_content = []
         with open(ref_sub_manual_path, "r") as f:
             for line in f:
-                ref_sub_manual_name.append(line.rstrip())
-        ref_sub_manual_name = "\n".join(ref_sub_manual_name)
+                ref_sub_manual_content.append(line.rstrip())
+        ref_sub_manual_content = "\n".join(ref_sub_manual_content)
 
     if not ref_subs_path or not audio_path or not ori_sub_path:
         return None
@@ -206,7 +206,7 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
                     FileTypes.AUDIO: audio_path.name,
                     FileTypes.ORIGINAL_SUB: ori_sub_path.name,
                     FileTypes.REF_SUB: ref_subs_string,
-                    FileTypes.REF_SUB_MANUAL: ref_sub_manual_name,
+                    FileTypes.REF_SUB_MANUAL: ref_sub_manual_content,
                 }
             )
         else:
@@ -537,11 +537,13 @@ async def create_session() -> SessionIdResponse:
     return SessionIdResponse(session_id=session_id)
 
 
-@app.delete("/session/{session_id}")
-async def delete_session(session_id: str):
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str) -> SessionIdResponse:
     session_path = storage_session_path / session_id
     shutil.rmtree(session_path)
-    return {"session_id": session_id}
+    return SessionIdResponse(
+        message="Session successfully deleted", session_id=session_id
+    )
 
 
 @app.get("/process-sub/{session_id}")
@@ -699,7 +701,6 @@ async def download_sub(session_id: str):
 @app.get("/files/{session_id}")
 async def get_files(session_id: str) -> FilesResponse:
     session_files = get_session_files(session_id, filename=True).files
-    session_files.pop(FileTypes.REF_SUB_MANUAL, None)
 
     if session_files:
         return FilesResponse(files=session_files)
@@ -776,10 +777,13 @@ async def upload_files(
         ref_dir = session_path / ref_sub_dirname
         ref_files = get_dir_files(ref_dir)
 
-        ref_subs_path = [file for file in ref_files if file.suffix in [".srt", ".ass"]]
+        if ref_files:
+            ref_subs_path = [
+                file for file in ref_files if file.suffix in [".srt", ".ass"]
+            ]
 
-        for ref_subs in ref_subs_path:
-            ref_subs.unlink()
+            for ref_subs in ref_subs_path:
+                ref_subs.unlink()
 
         for file in files:
             await save_upload_file(file, ref_dir)
@@ -788,6 +792,6 @@ async def upload_files(
     if file_type == FileTypes.REF_SUB_MANUAL:
         with open(session_path / ref_sub_dirname / manual_ref_sub_filename, "w") as f:
             f.write(sub)
-            uploaded_files.append(manual_ref_sub_filename)
+            uploaded_files.append(sub)
 
     return UploadResponse(message="upload success", filename=uploaded_files)
