@@ -655,7 +655,7 @@ async def get_sub(session_id: str) -> TranscriptionResponse:
     return TranscriptionResponse(transcription=transcription)
 
 
-@app.post("/sub/{session_id}")
+@app.get("/download-sub/{session_id}")
 async def download_sub(session_id: str):
     session_path = get_session_path(session_id)
     transcription = get_transcription(session_id)
@@ -690,7 +690,9 @@ async def download_sub(session_id: str):
     final_sub_path = session_path / final_sub_filename
     subs.save(final_sub_path)
 
-    return FileResponse(final_sub_path)
+    return FileResponse(
+        final_sub_path, filename=f"{session_id}.srt", media_type="text/plain"
+    )
 
 
 @app.get("/files/{session_id}")
