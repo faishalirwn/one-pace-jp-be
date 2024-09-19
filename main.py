@@ -173,11 +173,7 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
         for file in ori_files
         if mimetypes.guess_type(file)[0].split("/")[0] == "audio"
     ][0]
-    ori_sub_path = [
-        file
-        for file in ori_files
-        if mimetypes.guess_type(file)[0].split("/")[0] == "text"
-    ][0]
+    ori_sub_path = [file for file in ori_files if file.suffix in [".srt", ".ass"]][0]
 
     ref_subs_path = get_dir_files(session_path / ref_sub_dirname)
 
@@ -428,8 +424,9 @@ def transcribe_and_match(
                 start_time = line.start
                 end_time = line.end
                 ori_text = line.text
-                start_time_ffmpeg = pysubs2.time.ms_to_str(line.start)
-                end_time_ffmpeg = pysubs2.time.ms_to_str(line.end)
+                start_time_ffmpeg = pysubs2.time.ms_to_str(line.start, fractions=True)
+                end_time_ffmpeg = pysubs2.time.ms_to_str(line.end, fractions=True)
+                print("- ", segment_file_path.name, start_time_ffmpeg, end_time_ffmpeg)
                 subprocess.run(
                     [
                         "ffmpeg",
@@ -493,7 +490,7 @@ def transcribe_and_match(
     except Exception as e:
         global current_process_err
         current_process_err = str(e)
-        print(e)
+        print("💀💀💀💀💀💀💀💀💀", e)
 
 
 def get_transcription(session_id: str) -> SessionProcess | None:
