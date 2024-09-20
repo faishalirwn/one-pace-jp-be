@@ -1,0 +1,8 @@
+fugashi==1.3.2
+pysubs2==1.7.3
+jaconv==0.4.0
+fastapi[standard]==0.112.0
+rapidfuzz==3.9.6
+librosa==0.10.2.post1
+pydantic==1.10.17
+fugashi[unidic]==1.3.2
