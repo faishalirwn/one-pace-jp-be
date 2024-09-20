@@ -470,7 +470,7 @@ def transcribe_and_match(
                 "start_time": start_time,
                 "end_time": end_time,
                 "merge": merge,
-                "match": None,
+                "match": matches[0]["matched_text"] if matches else None,
                 "ori_text": ori_text,
             }
 
