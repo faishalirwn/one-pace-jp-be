@@ -126,7 +126,7 @@ class UploadResponse(Response):
 
 
 class SessionListResponse(Response):
-    session_list: list[str]
+    session_list: list[str] | None
 
 
 class SessionIdResponse(Response):
@@ -520,7 +520,7 @@ def is_session_processing(session_id: str) -> bool:
 @app.get("/sessions")
 async def get_sessions() -> SessionListResponse:
     if not storage_session_path.is_dir():
-        return SessionListResponse(session_list="")
+        return SessionListResponse(session_list=None)
     session_list = [f.name for f in os.scandir(storage_session_path) if f.is_dir()]
     return SessionListResponse(session_list=session_list)
 
