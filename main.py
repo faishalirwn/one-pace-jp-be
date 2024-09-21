@@ -42,9 +42,7 @@ model_path = storage_path / "whisperx_models"
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:3000",
-]
+origins = ["http://localhost:3000", "https://one-pace-jp-fe.vercel.app"]
 
 app.add_middleware(
     CORSMiddleware,
