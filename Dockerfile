@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libsndfile1 \
     ffmpeg \
-    git
+    git \
+    libcudnn8
 
 # Set work directory
 WORKDIR /code
