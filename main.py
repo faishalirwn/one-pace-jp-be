@@ -401,7 +401,7 @@ def transcribe_and_match(
             segments_dir_path.mkdir(exist_ok=True)
             sub = pysubs2.load(eng_sub_path)
 
-        print(f"reading audio file duration... {audio_path}")
+        print("reading audio file duration...")
 
         audio_duration = librosa.get_duration(path=audio_path)
 
