@@ -166,8 +166,8 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
     if not ori_files:
         return None
 
-    def is_audio_file(file):
-        if file.lower().endswith(".ass"):
+    def is_audio_file(file: Path):
+        if file.suffix == ".ass":
             return False
 
         mime_type, _ = mimetypes.guess_type(file)
