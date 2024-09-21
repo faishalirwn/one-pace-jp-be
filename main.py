@@ -166,11 +166,15 @@ def get_session_files(session_id: str, filename: bool = False) -> SessionFiles:
     if not ori_files:
         return None
 
-    audio_path = [
-        file
-        for file in ori_files
-        if mimetypes.guess_type(file)[0].split("/")[0] == "audio"
-    ][0]
+    def is_audio_file(file):
+        if file.lower().endswith(".ass"):
+            return False
+
+        mime_type, _ = mimetypes.guess_type(file)
+        return mime_type and mime_type.startswith("audio/")
+
+    audio_path = next((file for file in ori_files if is_audio_file(file)), None)
+
     ori_sub_path = [file for file in ori_files if file.suffix in [".srt", ".ass"]][0]
 
     ref_subs_path = get_dir_files(session_path / ref_sub_dirname)
@@ -397,7 +401,8 @@ def transcribe_and_match(
             segments_dir_path.mkdir(exist_ok=True)
             sub = pysubs2.load(eng_sub_path)
 
-        print("reading audio file duration...")
+        print(f"reading audio file duration... {audio_path}")
+
         audio_duration = librosa.get_duration(path=audio_path)
 
         print(session_id, "for i, line in enumerate(sub):....")
@@ -490,11 +495,16 @@ def transcribe_and_match(
     except Exception as e:
         global current_process_err
         current_process_err = str(e)
+        current_process[session_id]["status"] == Status.NOT_STARTED
         print("💀💀💀💀💀💀💀💀💀", e)
 
 
 def get_transcription(session_id: str) -> SessionProcess | None:
     session_path = get_session_path(session_id)
+
+    # do I have to do this everytime session_path?
+    if not session_path:
+        return None
 
     transcription_file = session_path / transcription_filename
     transcription_file_exists = transcription_file.is_file()
@@ -614,6 +624,10 @@ async def process_sub(
 
     if session_files[FileTypes.REF_SUB_MANUAL]:
         ja_sub_paths.append(session_files[FileTypes.REF_SUB_MANUAL])
+
+    print("audio", audio_path)
+    print("ori sub", eng_sub_path)
+    print("ref sub", ja_sub_paths)
 
     background_tasks.add_task(
         transcribe_and_match, session_path, ja_sub_paths, eng_sub_path, audio_path
